@@ -1,5 +1,6 @@
 import os
 import io
+import sys
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -30,9 +31,42 @@ from reportlab.lib.colors import HexColor
 from reportlab.lib.utils import ImageReader
 
 
-SETTINGS_FILE = "settings.json"
+SETTINGS_FILE = "voltage_settings.json"
+APP_CONFIG_FILE = "app_config.json"
+DEFAULT_APP_CONFIG = {
+    "organization_name": "Custom Organization",
+    "voltage_window_title": "Voltage Analysis Program",
+    "voltage_report_title": "Voltage Analysis Report",
+    "scale_auth": {
+        "enabled": False,
+        "username": "",
+        "password_hash": "",
+    },
+    "pdf_auto_open": True,
+}
+
+def merge_dicts(base, extra):
+    # Recursively merges the loaded application settings with the defaults.
+    merged = dict(base)
+    for key, value in extra.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+def load_app_config():
+    # Loads the optional application configuration from the local JSON file.
+    if os.path.exists(APP_CONFIG_FILE):
+        try:
+            with open(APP_CONFIG_FILE, "r", encoding="utf-8") as f:
+                return merge_dicts(DEFAULT_APP_CONFIG, json.load(f))
+        except Exception as e:
+            print(f"Uygulama ayarlari okunamadi: {e}")
+    return dict(DEFAULT_APP_CONFIG)
 
 def load_settings():
+    # Loads the persisted voltage settings from disk when available.
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -43,16 +77,19 @@ def load_settings():
     return {}
 
 def save_settings(settings):
+    # Saves the current voltage settings to the local JSON file.
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2)
     except Exception as e:
         print(f"Ayarlar kaydedilemedi: {e}")
 
+APP_CONFIG = load_app_config()
+
 # Global variables
 view_history = []
-KULLANICI_ADI = "Hızal_Osman"
-HASHLI_SIFRE = b"$2b$12$0QdgDe.XRyY8aqTUyRfreugcr6uIT/v1FrOYoXjNM1yuSDn72ekli"
+last_pdf_path = None
+pdf_open_button = None
 
 # Color mappings for result display
 DEGERLER_SIRALAMA = [
@@ -105,6 +142,7 @@ EPS = 1e-9
 
 
 def create_modern_button(parent, text, command, bg_color, hover_color=None, width=180, height=45):
+    # Creates a styled button container for the main control area.
     if hover_color is None:
         hover_color = bg_color
 
@@ -117,8 +155,10 @@ def create_modern_button(parent, text, command, bg_color, hover_color=None, widt
     )
 
     def on_enter(e): btn.config(bg=hover_color)
+        # Applies the hover color when the pointer enters the button.
 
     def on_leave(e): btn.config(bg=bg_color)
+        # Restores the base color when the pointer leaves the button.
 
     btn.bind("<Enter>", on_enter)
     btn.bind("<Leave>", on_leave)
@@ -127,6 +167,16 @@ def create_modern_button(parent, text, command, bg_color, hover_color=None, widt
 
 #Tam ortalı, hash şifreli Modern admin girişi
 def admin_giris_paneli_modern(parent, on_success):
+    # Prompts for scale access only when local admin protection is enabled.
+    auth_config = APP_CONFIG.get("scale_auth", {})
+    username = str(auth_config.get("username", "") or "")
+    password_hash = auth_config.get("password_hash", "")
+    auth_enabled = bool(auth_config.get("enabled")) and bool(username) and bool(password_hash)
+
+    if not auth_enabled:
+        on_success()
+        return
+
     giris_pencere = tk.Toplevel(parent)
     giris_pencere.title("Yönetici Girişi")
     giris_pencere.geometry("400x325")
@@ -148,7 +198,7 @@ def admin_giris_paneli_modern(parent, on_success):
              font=("Segoe UI", 11, "bold"), bg="#f8fafc").pack(anchor="w", padx=4)
     entry_kullanici = tk.Entry(ana_cerceve, font=("Segoe UI", 12), bd=2, relief="groove")
     entry_kullanici.pack(fill="x", padx=2, pady=(2, 13))
-    entry_kullanici.insert(0, "Hızal_Osman")
+    entry_kullanici.insert(0, username)
 
     tk.Label(ana_cerceve, text="Şifre:",
              font=("Segoe UI", 11, "bold"), bg="#f8fafc").pack(anchor="w", padx=4)
@@ -160,8 +210,8 @@ def admin_giris_paneli_modern(parent, on_success):
 
     show_var = tk.BooleanVar(value=False)
 
-    #Şifreyi * dan real görünüme alır
     def toggle_password():
+        # Toggles password visibility in the admin login dialog.
         entry_sifre.config(show="" if show_var.get() else "*")
 
     cb = tk.Checkbutton(frame_pw, text="Şifreyi göster", variable=show_var,
@@ -173,17 +223,19 @@ def admin_giris_paneli_modern(parent, on_success):
                           bg="#f8fafc", font=("Segoe UI", 10, "bold"))
     hata_label.pack(pady=(7, 4))
 
-    #Şifre kontrol
     def dogrula_ve_kapat():
+        # Validates the provided admin credentials against the local config.
+        stored_hash = password_hash.encode() if isinstance(password_hash, str) else password_hash
         kullanici = entry_kullanici.get().strip()
         sifre = entry_sifre.get()
-        if (kullanici == KULLANICI_ADI and bcrypt.checkpw(sifre.encode(), HASHLI_SIFRE)):
+        if kullanici == username and bcrypt.checkpw(sifre.encode(), stored_hash):
             giris_pencere.destroy()
             on_success()
         else:
             hata_label.config(text="Kullanıcı adı veya şifre hatalı!")
 
     def iptal():
+        # Closes the current dialog without applying a new action.
         giris_pencere.destroy()
 
     btn_frame = tk.Frame(ana_cerceve, bg="#f8fafc")
@@ -197,8 +249,8 @@ def admin_giris_paneli_modern(parent, on_success):
                           font=("Segoe UI", 12, "bold"), bg="#e5e7eb", fg="#374151", bd=0, width=11)
     iptal_btn.pack(side="left", expand=True, padx=(6, 0))
 
-    # Enter ile giriş
     def enter_pressed(event):
+        # Submits the login dialog when the Enter key is pressed.
         dogrula_ve_kapat()
 
     entry_kullanici.bind('<Return>', enter_pressed)
@@ -211,6 +263,7 @@ def admin_giris_paneli_modern(parent, on_success):
 
 
 def format_duration(sec, decimals=4):
+    # Formats a time duration using a readable engineering unit.
     abs_sec = abs(sec)
     if abs_sec >= 1:
         val, unit = sec, "s"
@@ -224,6 +277,7 @@ def format_duration(sec, decimals=4):
     return f"{s} {unit}"
 
 def read_data(dosya):
+    # Reads the input file and returns cleaned time-voltage data.
     try:
         # Önce encoding tespiti
         with open(dosya, "rb") as f:
@@ -299,6 +353,7 @@ def read_data(dosya):
 
 # Sample Interval * Record Length ile tpeak hesaplandı
 def calculate_basic_values(df, sample_interval=None, record_length=None):
+    # Calculates peak, polarity, and timing basics from the waveform data.
     if df.empty:
         raise ValueError("DataFrame boş")
 
@@ -336,6 +391,7 @@ def calculate_basic_values(df, sample_interval=None, record_length=None):
 
 
 def initialize_globals():
+    # Ensures the shared runtime globals are initialized before use.
 
     global view_history, last_sonuc_rows, global_df
     global graph_canvas, graph_toolbar, scale_factor
@@ -354,6 +410,7 @@ def initialize_globals():
         scale_factor = 1.0
 
 def _first_cross_time(x, y, thresh, descending):
+    # Interpolates the first threshold crossing time on the selected segment.
     """
     y =mx +b
     m=(y1-y0) / (x1-x0)
@@ -373,6 +430,7 @@ def _first_cross_time(x, y, thresh, descending):
 
 
 def calculate_time_values(df, b):
+    # Calculates waveform timing values derived from the main peak.
     peak = b["peak_voltage"]
     max_index = b["idx_peak"]
 
@@ -432,6 +490,7 @@ def calculate_time_values(df, b):
     }
 
 def calculate_derivative_value(t):
+    # Calculates the derivative-based metric from the 30 and 90 percent levels.
     voltage_diff = abs(t['voltage_90'] - t['voltage_30'])
     T = t['T0']
 
@@ -443,6 +502,7 @@ def calculate_derivative_value(t):
 
 
 def calculate_tp_switching(t):
+    # Calculates the switching time estimate from the derived waveform metrics.
     T0_us = t["T0"] * 1e6
     T2_us = t["T2"] * 1e6
     K = 2.42 - 3.08e-3 * T0_us + 1.51e-4 * T2_us
@@ -450,6 +510,7 @@ def calculate_tp_switching(t):
 
 
 def _fit_tail_and_intersect_v90(x, y, v70, v10, v90, fallback_points=50):
+    # Fits the waveform tail and estimates its 90 percent intersection time.
     if v70 > v10:
         mask = (y <= v70) & (y >= v10)
     else:
@@ -471,6 +532,7 @@ def _fit_tail_and_intersect_v90(x, y, v70, v10, v90, fallback_points=50):
 
 
 def calculate_chop_values(df, b, t):
+    # Calculates the visible and chop timing values after the main peak.
 
     ispos = b["is_positive"]
     idx = b["idx_peak"]
@@ -504,12 +566,14 @@ def calculate_chop_values(df, b, t):
     }
 
 def t2_to_microseconds_only_display(T2):
+    # Formats the T2 value specifically in microseconds for display.
     T2_us = T2 * 1e6
     s = f"{T2_us:.4f}".rstrip("0").rstrip(".").replace(".", ",")
     return f"{s} µs"
 
 
 def format_results(b, t, c, tp_sw, file_name, derivative_value):
+    # Formats the voltage analysis metrics into display-ready result rows.
 
     if not all([b, t, c]) or any(v is None for v in [
         b.get('max_voltage'), b.get('min_voltage'),
@@ -548,12 +612,14 @@ def format_results(b, t, c, tp_sw, file_name, derivative_value):
 
 # Ana pencere boyutu değiştiğinde tüm panelleri yeniden düzenle
 def on_window_configure(event):
+    # Schedules a layout refresh after the main window size changes.
     if event.widget == root:
         if hasattr(on_window_configure, 'after_id'):
             root.after_cancel(on_window_configure.after_id)
         on_window_configure.after_id = root.after(200, update_layout)
 
 def update_layout():
+    # Updates panel widths and redraws the graph for the current window size.
     root.update_idletasks()
     window_width = root.winfo_width()
 
@@ -571,7 +637,9 @@ def update_layout():
         root.after(100, update_graph)
 
 def change_scale():
+    # Starts the protected scale-change workflow for the current session.
     def after_admin():
+        # Applies the new scale factor after successful authorization.
         global scale_factor
         root.lift()
         root.focus_force()
@@ -588,6 +656,7 @@ def change_scale():
 
 
 def create_modern_result_card(parent, title, value, color_key):
+    # Builds a styled result card for one computed metric.
     card_frame = tk.Frame(parent, bg=COLORS['bg_secondary'], relief='solid', bd=1)
     card_frame.pack(fill='x', padx=5, pady=2.1, expand=True)
 
@@ -629,6 +698,7 @@ def create_modern_result_card(parent, title, value, color_key):
 
 
 def update_results_panel():
+    # Rebuilds the left-side results panel from the latest analysis rows.
     global file_label, header_bar
 
     # Sol paneli temizle
@@ -692,6 +762,7 @@ def update_results_panel():
 
 
 def update_graph():
+    # Rebuilds the graph area with the latest processed voltage data.
 
     global graph_canvas, graph_toolbar, view_history, global_df
 
@@ -758,6 +829,7 @@ def update_graph():
     from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
     class CustomToolbar(NavigationToolbar2Tk):
         def __init__(self, canvas, window):
+            # Initializes the custom toolbar without packing it into the layout.
             super().__init__(canvas, window)
             self.pack_forget()
 
@@ -769,6 +841,7 @@ def update_graph():
 
     # Undo butonu
     def undo_view():
+        # Restores the previous zoom or pan view from the history stack.
         if len(view_history) > 1:
             view_history.pop()
             xlim, ylim = view_history[-1]
@@ -788,6 +861,7 @@ def update_graph():
     is_panning = False
 
     def on_scroll(event):
+        # Zooms the graph around the current mouse position.
         if event.inaxes != ax:
             return
         view_history.append((ax.get_xlim(), ax.get_ylim()))
@@ -802,6 +876,7 @@ def update_graph():
         graph_canvas.draw()
 
     def on_press(event):
+        # Captures the initial mouse position for graph panning.
         nonlocal pan_start, is_panning
         if event.button == 1 and event.inaxes == ax:
             pan_start = (event.xdata, event.ydata)
@@ -809,6 +884,7 @@ def update_graph():
             view_history.append((ax.get_xlim(), ax.get_ylim()))
 
     def on_motion(event):
+        # Pans the graph while the left mouse button is held down.
         nonlocal pan_start, is_panning
         if pan_start is None or event.inaxes != ax:
             return
@@ -823,6 +899,7 @@ def update_graph():
         graph_canvas.draw_idle()
 
     def on_release(event):
+        # Clears the panning state after the mouse button is released.
         nonlocal pan_start, is_panning
         pan_start = None
         is_panning = False
@@ -835,6 +912,7 @@ def update_graph():
 
 
 def setup_main_workspace():
+    # Builds the main responsive workspace layout for the application.
     """Ana çalışma alanını kur - responsive tasarım"""
     global main_workspace, left_frame, right_frame
 
@@ -844,6 +922,7 @@ def setup_main_workspace():
 
     # Pencere boyutuna göre sütun ayarları
     def configure_columns():
+        # Configures the workspace columns for the current window width.
         window_width = root.winfo_width()
         if window_width < 1000:  # Küçük ekran
             # Tek sütun - üst alt yerleşim
@@ -881,6 +960,7 @@ def setup_main_workspace():
 
     # Pencere boyutu değiştiğinde yeniden düzenle
     def on_window_resize(event):
+        # Schedules a responsive layout refresh after the window is resized.
         if event.widget == root:
             root.after(200, configure_columns)
             if global_df is not None:
@@ -891,15 +971,22 @@ def setup_main_workspace():
 
 # 6. Ana fonksiyon koruması:
 def analiz(dosya):
+    # Runs the selected voltage analysis workflow for the provided file path.
     """Ana analiz fonksiyonu - Güvenli versiyon"""
-    global secili_dosya_yolu, last_sonuc_rows, global_df
+    global secili_dosya_yolu, last_sonuc_rows, global_df, last_pdf_path, pdf_open_button
 
     if not dosya or not os.path.exists(dosya):
         messagebox.showerror("Hata!", "Geçerli dosya seçilmedi.")
         return
 
     try:
+        header_bar.config(bg=COLORS['warning'])
+        file_label.config(text=f"{os.path.basename(dosya)} analiz ediliyor...", bg=COLORS['warning'], fg='white')
+        root.update_idletasks()
         secili_dosya_yolu = dosya
+        last_pdf_path = None
+        if pdf_open_button:
+            pdf_open_button.config(state="disabled")
         df = read_data(dosya)
 
         if df is None or df.empty:
@@ -948,6 +1035,7 @@ def analiz(dosya):
 
 
 def dosya_sec():
+    # Opens a file picker and starts the analysis for the selected CSV file.
     """Dosya seçim dialogu"""
     f = filedialog.askopenfilename(
         title="CSV Dosyası Seç",
@@ -959,6 +1047,7 @@ def dosya_sec():
 
 
 def on_drop(event):
+    # Processes files dropped onto the application window.
     """Drag & drop handler"""
     try:
         path_raw = event.data.strip()
@@ -973,9 +1062,34 @@ def on_drop(event):
         messagebox.showerror("Sürükle-Bırak Hatası", f"Dosya okunamadı:\n{e}")
 
 
+def dosyayi_varsayilan_uygulama_ile_ac(path):
+    # Opens the given file with the default operating system application.
+    if not path or not os.path.exists(path):
+        raise FileNotFoundError("Dosya bulunamadi.")
+    if os.name == "nt":
+        os.startfile(path)
+    elif sys.platform == "darwin":
+        import subprocess
+        subprocess.call(["open", path])
+    else:
+        import subprocess
+        subprocess.call(["xdg-open", path])
+
+def pdf_ac():
+    # Opens the last generated PDF report when it is available.
+    global last_pdf_path
+    if last_pdf_path and os.path.exists(last_pdf_path):
+        try:
+            dosyayi_varsayilan_uygulama_ile_ac(last_pdf_path)
+        except Exception as e:
+            messagebox.showerror("Hata!", f"PDF acilamadi:\n{e}")
+    else:
+        messagebox.showwarning("Uyarı", "Henüz PDF oluşturulmadı veya dosya yok.")
+
 def pdf_olustur():
+    # Builds and saves a PDF report for the current analysis result.
     """PDF raporu oluştur"""
-    global last_sonuc_rows, global_df, secili_dosya_yolu, scale_factor
+    global last_sonuc_rows, global_df, secili_dosya_yolu, scale_factor, last_pdf_path, pdf_open_button
 
     if not last_sonuc_rows or global_df is None:
         messagebox.showwarning("Uyarı", "Önce bir dosya analiz edin.")
@@ -1019,7 +1133,7 @@ def pdf_olustur():
         )
         story = []
 
-        # Tarih
+        # History
         tarih_saat = datetime.now().strftime('%d.%m.%Y %H:%M')
         tarih_style = ParagraphStyle(
             name='tarih', alignment=2, fontName=font_name,
@@ -1042,14 +1156,14 @@ def pdf_olustur():
             alignment=TA_CENTER, textColor='#f59e0b', spaceAfter=10
         )
 
-        story.append(Paragraph("Hızal Elektroerozyon", style_header))
+        story.append(Paragraph(APP_CONFIG["organization_name"], style_header))
         story.append(Spacer(1, 3))
-        story.append(Paragraph(f"{os.path.basename(secili_dosya_yolu)} Analiz Raporu", style_report))
+        story.append(Paragraph(APP_CONFIG["voltage_report_title"], style_report))
         story.append(Spacer(1, 6))
         story.append(Paragraph("Analiz Sonuçları", style_analiz))
         story.append(Spacer(1, 12))
 
-        # Tablo verisi
+        # Table Data
         data = []
         if last_sonuc_rows:
             data.append([last_sonuc_rows[0], "", ""])
@@ -1084,7 +1198,7 @@ def pdf_olustur():
         story.append(table)
         story.append(Spacer(1, 5))
 
-        # Grafik
+        # Graphs
         x_us = global_df["time"].values * 1e6
         y = global_df["volume"].values * scale_factor / 1000
         df_xy = pd.DataFrame({'x': x_us, 'y': y}).drop_duplicates('x', keep='last').sort_values('x')
@@ -1113,13 +1227,22 @@ def pdf_olustur():
         story.append(img)
 
         doc.build(story)
+        last_pdf_path = pdf_path
+        if pdf_open_button:
+            pdf_open_button.config(state="normal")
         messagebox.showinfo("Başarılı", f"PDF başarıyla kaydedildi:\n{pdf_path}")
+        if APP_CONFIG.get("pdf_auto_open", True):
+            try:
+                dosyayi_varsayilan_uygulama_ile_ac(pdf_path)
+            except Exception as e:
+                messagebox.showwarning("Uyarı", f"PDF kaydedildi fakat otomatik açılamadı:\n{e}")
 
     except Exception as e:
         messagebox.showerror("Hata!", f"PDF oluşturulurken hata:\n{str(e)}")
 
 
 def modern_pdf_name_dialog(parent):
+    # Shows a small modal dialog that collects the PDF file name.
     """PDF adı girme dialogu"""
     dialog = tk.Toplevel(parent)
     dialog.title("PDF Adı Belirle")
@@ -1147,12 +1270,14 @@ def modern_pdf_name_dialog(parent):
     result = {"name": None}
 
     def ok():
+        # Confirms the current dialog value and closes the window.
         value = entry.get().strip()
         if value:
             result["name"] = value
             dialog.destroy()
 
     def cancel():
+        # Closes the current dialog without saving a new value.
         dialog.destroy()
 
     btn_frame = tk.Frame(dialog, bg="#f8fafc")
@@ -1171,6 +1296,7 @@ def modern_pdf_name_dialog(parent):
 
 
 def modern_scale_dialog(parent, current_scale):
+    # Shows the scale factor editor dialog and validates numeric input.
     """Ölçek değiştirme dialogu"""
     dialog = tk.Toplevel(parent)
     dialog.title("Ölçek Değiştir")
@@ -1199,6 +1325,7 @@ def modern_scale_dialog(parent, current_scale):
     result = {"scale": None}
 
     def ok():
+        # Confirms the current dialog value and closes the window.
         try:
             val = float(entry.get())
             if val > 0:
@@ -1208,6 +1335,7 @@ def modern_scale_dialog(parent, current_scale):
             entry.config(bg="#fee2e2")
 
     def cancel():
+        # Closes the current dialog without saving a new value.
         dialog.destroy()
 
     btn_frame = tk.Frame(dialog, bg="#f8fafc")
@@ -1243,7 +1371,7 @@ if __name__ == "__main__":
         except tk.TclError as e:
             print("ERROR: tkdnd yüklü değil veya bulunamıyor:", e)
 
-    root.title("HIZAL ELEKTRO EROZYON ANALİZ PROGRAMI- 2025")
+    root.title(APP_CONFIG["voltage_window_title"])
     root.geometry("1600x900")
     root.configure(bg=COLORS['bg_main'])
     root.minsize(800, 450)
@@ -1275,6 +1403,7 @@ if __name__ == "__main__":
     button_panel.grid_columnconfigure(0, weight=1)
     button_panel.grid_columnconfigure(1, weight=1)
     button_panel.grid_columnconfigure(2, weight=1)
+    button_panel.grid_columnconfigure(3, weight=1)
 
     # Butonlar
     btn_csv = create_modern_button(
@@ -1292,7 +1421,28 @@ if __name__ == "__main__":
         button_panel, "PDF OLUŞTUR", pdf_olustur,
         COLORS['accent'], '#059669'
     )
-    btn_pdf.grid(row=0, column=2, sticky="ew", padx=(5, 0), pady=10)
+    btn_pdf.grid(row=0, column=2, sticky="ew", padx=(5, 5), pady=10)
+
+    open_btn_frame = tk.Frame(button_panel, bg=COLORS['bg_main'])
+    pdf_open_button = tk.Button(
+        open_btn_frame,
+        text="PDF AÇ",
+        command=pdf_ac,
+        font=('Segoe UI', 12, 'bold'),
+        bg='#1e3a8a',
+        fg='white',
+        activebackground='#2563eb',
+        activeforeground='white',
+        disabledforeground='#e5e7eb',
+        bd=0,
+        relief='flat',
+        padx=20,
+        pady=10,
+        cursor='hand2',
+        state='disabled'
+    )
+    pdf_open_button.pack(fill='both', expand=True)
+    open_btn_frame.grid(row=0, column=3, sticky="ew", padx=(5, 0), pady=10)
 
     # Ana çalışma alanı
     main_workspace = tk.Frame(root, bg=COLORS['bg_main'])
