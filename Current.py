@@ -1,8 +1,4 @@
-"""
-bu sürümde a-b-c-d akım programları için hesaplamalar tek yapıda toplandı.
-gui kısımları aynı kaldığı için hesap mantıkları birleştirildi.
-Hesapların hepsi firmanın standartlarına uygun şekilde hesaplandı..
-"""
+"""Desktop application for analyzing current waveform data and exporting PDF reports."""
 
 # kütüphaneler
 import io, os, sys, json, subprocess
@@ -42,9 +38,41 @@ except Exception as e:
     TkinterDnD = tk.Tk
 
 # genel ayarlar ve sabitler
-AyarDosyasi = "tüm_Değerler.json"
-SabitKullaniciAdiSkala = "HIZAL_ELEKTROEROZYON"
-HashSifre = b"$2b$12$0QdgDe.XRyY8aqTUyRfreugcr6uIT/v1FrOYoXjNM1yuSDn72ekli"
+AyarDosyasi = "current_settings.json"
+UygulamaAyarDosyasi = "app_config.json"
+VarsayilanUygulamaAyarlari = {
+    "organization_name": "Custom Organization",
+    "current_window_title": "Current Analysis Program",
+    "current_report_title": "Current Analysis Report",
+    "scale_auth": {
+        "enabled": False,
+        "username": "",
+        "password_hash": "",
+    },
+    "pdf_auto_open": True,
+}
+
+def SozlukleriBirlestir(temel: dict, gelen: dict) -> dict:
+    # Recursively merges the loaded application settings with the defaults.
+    sonuc = dict(temel)
+    for anahtar, deger in gelen.items():
+        if isinstance(deger, dict) and isinstance(sonuc.get(anahtar), dict):
+            sonuc[anahtar] = SozlukleriBirlestir(sonuc[anahtar], deger)
+        else:
+            sonuc[anahtar] = deger
+    return sonuc
+
+def UygulamaAyarlariniYukle() -> dict:
+    # Loads the optional application configuration from the local JSON file.
+    if os.path.exists(UygulamaAyarDosyasi):
+        try:
+            with open(UygulamaAyarDosyasi, "r", encoding="utf-8") as f:
+                return SozlukleriBirlestir(VarsayilanUygulamaAyarlari, json.load(f))
+        except Exception as e:
+            print("uygulama ayarlari okunamadi:", e)
+    return dict(VarsayilanUygulamaAyarlari)
+
+UygulamaAyarlari = UygulamaAyarlariniYukle()
 
 HesaplananDegerlerSirasi = [
     ("Max Current (Ip)", "red"), ("Time to Peak (Tp)", "black"),
@@ -101,6 +129,7 @@ GrafikAracCubugu = None
 
 # ayar okuma ve yazma
 def AyarlariYukle():
+    # Loads the persisted user settings from disk when the file exists.
     if os.path.exists(AyarDosyasi):
         try:
             with open(AyarDosyasi, "r", encoding="utf-8") as f:
@@ -110,6 +139,7 @@ def AyarlariYukle():
     return {}
 
 def AyarlariKaydet(ayarlar: dict):
+    # Saves the current user settings to the local JSON file.
     try:
         with open(AyarDosyasi, "w", encoding="utf-8") as f:
             json.dump(ayarlar, f, indent=2)
@@ -122,6 +152,7 @@ SonMod = Ayarlar.get("mode", "A")
 
 # yardımcılar
 def DurumDegiskenleriniSifirla():
+    # Resets the shared runtime state used by the current analysis workflow.
     global GorunumGecmisi, SonSonucSatirlari, \
         GenelVeri, GrafikKanvasi, GrafikAracCubugu, \
         SonMetrikler
@@ -133,6 +164,7 @@ def DurumDegiskenleriniSifirla():
     SonMetrikler = None
 
 def ZamanAkimOku(yol: str) -> tuple:
+    # Reads the input file and returns cleaned time-current data.
     if not os.path.exists(yol):
         raise FileNotFoundError(f"dosya yok: {yol}")
 
@@ -197,6 +229,7 @@ def ZamanAkimOku(yol: str) -> tuple:
     return df, baslangic, len(df)
 
 def ZamanBiriminiTahminEtVeMs(zaman: np.ndarray):
+    # Normalizes detected time values into milliseconds for downstream calculations.
     genislik = np.nanmax(zaman) - np.nanmin(zaman)
     if genislik <= 0:
         return zaman * 1e3, "unknown"
@@ -207,6 +240,7 @@ def ZamanBiriminiTahminEtVeMs(zaman: np.ndarray):
     return zaman * 1e-3, "us"
 
 def AgresifYumusat(x: np.ndarray, pencere: int = 15) -> np.ndarray:
+    # Applies repeated moving-average smoothing to the waveform data.
     if pencere <= 1 or len(x) < pencere:
         return x
     cekirdek = np.ones(pencere) / pencere
@@ -215,11 +249,13 @@ def AgresifYumusat(x: np.ndarray, pencere: int = 15) -> np.ndarray:
     return y
 
 def TetikZamaniniDogrulaHesapla(zaman_ms: np.ndarray, akim: np.ndarray, tepe_indeks: int, tepe_deger: float):
+    # Calculates trigger and threshold crossing times around the waveform peak.
     zaman_yukari = zaman_ms[:tepe_indeks + 1]
     y = np.abs(akim[:tepe_indeks + 1])
     A = abs(tepe_deger)
 
     def IlkKesisim(seviye, bas_indeks=0):
+        # Finds the first interpolated threshold crossing in the rising segment.
         for i in range(max(1, bas_indeks), len(y)):
             if y[i-1] < seviye <= y[i]:
                 t1, t2 = zaman_yukari[i-1], zaman_yukari[i]
@@ -254,6 +290,7 @@ def TetikZamaniniDogrulaHesapla(zaman_ms: np.ndarray, akim: np.ndarray, tepe_ind
 
 # varyant hesaplamaları A B C D
 def MetrikleriHesaplaA(zaman_ms: np.ndarray, akim: np.ndarray, taban: float, zaman_olcek: float = 1.0):
+    # Calculates variant A waveform metrics from the aligned current signal.
     akim_abs = np.abs(akim - taban)
     tepe_indeks = np.argmax(akim_abs)
     tepe_deger = akim[tepe_indeks]
@@ -297,6 +334,7 @@ def MetrikleriHesaplaA(zaman_ms: np.ndarray, akim: np.ndarray, taban: float, zam
     }
 
 def SonuclariBicimlendirA(metrik: dict, dosya_adi: str):
+    # Formats variant A metrics into display-ready result rows.
     pol = "POZİTİF POLARİTE " if metrik["Ip"] > 0 else "NEGATİF POLARİTE "
     baslik = f'{pol}"{dosya_adi}" Analiz edildi'
     ogeler = [
@@ -311,6 +349,7 @@ def SonuclariBicimlendirA(metrik: dict, dosya_adi: str):
     return [baslik] + [f"{k:<{genislik}} = {v}" for k, v in ogeler]
 
 def MetrikleriHesaplaB(zaman_ms: np.ndarray, akim: np.ndarray, taban: float, zaman_olcek: float = 1.0):
+    # Calculates variant B waveform metrics from the aligned current signal.
     akim_abs = np.abs(akim - taban)
     tepe_indeks = np.argmax(akim_abs)
     tepe_deger = akim[tepe_indeks]
@@ -354,6 +393,7 @@ def MetrikleriHesaplaB(zaman_ms: np.ndarray, akim: np.ndarray, taban: float, zam
         }
 
 def SonuclariBicimlendirB(metrik: dict, dosya_adi: str):
+    # Formats variant B metrics into display-ready result rows.
     pol = "POZİTİF POLARİTE " if metrik["Ip"] > 0 else "NEGATİF POLARİTE "
     baslik = f'{pol}"{dosya_adi}" Analiz edildi'
     ogeler = \
@@ -370,11 +410,13 @@ def SonuclariBicimlendirB(metrik: dict, dosya_adi: str):
     return [baslik] + [f"{k:<{genislik}} = {v}" for k, v in ogeler]
 
 def MetrikleriHesaplaC(zaman_ms: np.ndarray, akim: np.ndarray, taban: float):
+    # Calculates variant C waveform metrics from the aligned current signal.
     akim_abs = np.abs(akim - taban)
     tepe_indeks = np.argmax(akim_abs)
     Ip = akim[tepe_indeks]
 
     def TetikZamaniBul(zaman_ms, akim, taban):
+        # Estimates the trigger time for variant C using threshold intersections.
         akim_abs = np.abs(akim - taban)
         tepe_indeks = np.argmax(akim_abs)
         tepe_deger = akim[tepe_indeks]
@@ -422,6 +464,7 @@ def MetrikleriHesaplaC(zaman_ms: np.ndarray, akim: np.ndarray, taban: float):
        }
 
 def SonuclariBicimlendirC(metrik: dict, dosya_adi: str):
+    # Formats variant C metrics into display-ready result rows.
     pol = "POZİTİF POLARİTE " if metrik["Ip"] > 0 else "NEGATİF POLARİTE "
     baslik = f'{pol}"{dosya_adi}" Analiz edildi'
     ogeler = [
@@ -435,6 +478,7 @@ def SonuclariBicimlendirC(metrik: dict, dosya_adi: str):
 
 MetrikleriHesaplaD = MetrikleriHesaplaA
 def SonuclariBicimlendirD(metrik: dict, dosya_adi: str):
+    # Formats variant D metrics into display-ready result rows.
     return SonuclariBicimlendirA(metrik, dosya_adi)
 
 Varyantlar = \
@@ -447,6 +491,7 @@ Varyantlar = \
 
 # görsel ve pdf
 def AnaGrafikSekliOlustur(zaman_hizali, akim_yumusat, taban, metrikler):
+    # Builds the main current plot and its interactive guide markers.
     fig, ax = plt.subplots(figsize=(8, 5.1), dpi=140)
     fig.patch.set_facecolor(Renkler2["bg_secondary"])
     ax.set_facecolor(Renkler2["bg_secondary"])
@@ -505,6 +550,7 @@ def AnaGrafikSekliOlustur(zaman_hizali, akim_yumusat, taban, metrikler):
     durum = {"gizli": False}
 
     def Tetikle(_evt=None):
+        # Toggles the visibility of the reference lines on the chart.
         durum["gizli"] = not durum["gizli"]
         for ln in dikeyler:
             ln.set_visible(not durum["gizli"])
@@ -519,6 +565,7 @@ def AnaGrafikSekliOlustur(zaman_hizali, akim_yumusat, taban, metrikler):
     return fig
 
 def PdfRaporUret(pdf_yolu: str, sonuc_satirlari: list, fig):
+    # Creates the PDF report with the formatted results and rendered chart.
     if not ReportLabVar:
         raise RuntimeError("reportlab kurulu değil")
 
@@ -551,9 +598,9 @@ def PdfRaporUret(pdf_yolu: str, sonuc_satirlari: list, fig):
     stil_rpt = ParagraphStyle("Report", fontName=font_adi, fontSize=13, alignment=TA_CENTER, textColor="#111827", spaceAfter=8)
     stil_anl = ParagraphStyle("Analiz", fontName=font_adi, fontSize=16, alignment=TA_CENTER, textColor="#f59e0b", spaceAfter=10)
 
-    icerik.append(Paragraph("Hızal Akım Elektroerozyon", stil_hdr))
+    icerik.append(Paragraph(UygulamaAyarlari["organization_name"], stil_hdr))
     icerik.append(Spacer(1, 3))
-    icerik.append(Paragraph("Birleşik Analiz Raporu", stil_rpt))
+    icerik.append(Paragraph(UygulamaAyarlari["current_report_title"], stil_rpt))
     icerik.append(Spacer(1, 6))
     icerik.append(Paragraph("Analiz Sonuçları", stil_anl))
     icerik.append(Spacer(1, 12))
@@ -603,11 +650,16 @@ def PdfRaporUret(pdf_yolu: str, sonuc_satirlari: list, fig):
 
 # uygulama akışı
 def AnalizYap(dosya):
+    # Runs the selected current analysis workflow for the provided file path.
     global SeciliDosyaYolu, SonSonucSatirlari, GenelVeri, SonMetrikler
     if not dosya or not os.path.exists(dosya):
         messagebox.showerror("Hata!", "geçerli dosya seçilmedi")
         return
     try:
+        if UstCizgi and DosyaEtiketi:
+            UstCizgi.config(bg=Renkler2["warning"])
+            DosyaEtiketi.config(text=f"{os.path.basename(dosya)} analiz ediliyor...", bg=Renkler2["warning"], fg="white")
+            Kok.update_idletasks()
         SeciliDosyaYolu = dosya
         df, _, _ = ZamanAkimOku(dosya)
         if df is None or df.empty:
@@ -643,6 +695,7 @@ def AnalizYap(dosya):
         messagebox.showerror("Hata!", f"analiz sırasında hata oluştu:\n{e}")
 
 def GrafikGuncelle():
+    # Rebuilds the chart area with the latest processed current data.
     global GrafikKanvasi, GrafikAracCubugu, GorunumGecmisi
 
     if GrafikKanvasi:
@@ -683,6 +736,7 @@ def GrafikGuncelle():
     from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
     class OzellestirilmisAracCubugu(NavigationToolbar2Tk):
         def __init__(self, canvas, window):
+            # Initializes the custom toolbar without packing it into the layout.
             super().__init__(canvas, window)
             self.pack_forget()
     GrafikAracCubugu = OzellestirilmisAracCubugu(GrafikKanvasi, SagCerceve)
@@ -692,6 +746,7 @@ def GrafikGuncelle():
     GorunumGecmisi.append((ax.get_xlim(), ax.get_ylim()))
 
     def GeriAl():
+        # Restores the previous zoom or pan view from the history stack.
         if len(GorunumGecmisi) > 1:
             GorunumGecmisi.pop()
             xlim, ylim = GorunumGecmisi[-1]
@@ -706,6 +761,7 @@ def GrafikGuncelle():
     pan_bas = {"x": None, "y": None}
 
     def FareTeker(event):
+        # Zooms the chart around the current mouse position.
         if event.inaxes != ax or not GrafikKanvasi:
             return
         GorunumGecmisi.append((ax.get_xlim(), ax.get_ylim()))
@@ -719,11 +775,13 @@ def GrafikGuncelle():
         GrafikKanvasi.draw()
 
     def FareBas(event):
+        # Captures the initial mouse position for chart panning.
         if event.button == 1 and event.inaxes == ax and event.xdata is not None:
             pan_bas["x"], pan_bas["y"] = event.xdata, event.ydata
             GorunumGecmisi.append((ax.get_xlim(), ax.get_ylim()))
 
     def FareHareket(event):
+        # Pans the chart while the left mouse button is held down.
         if pan_bas["x"] is None or event.inaxes != ax or not GrafikKanvasi:
             return
         if event.xdata is None or event.ydata is None:
@@ -736,6 +794,7 @@ def GrafikGuncelle():
         GrafikKanvasi.draw_idle()
 
     def FareBirak(event):
+        # Clears the panning state after the mouse button is released.
         pan_bas["x"] = pan_bas["y"] = None
 
     if GrafikKanvasi and GrafikKanvasi.get_tk_widget().winfo_exists():
@@ -744,22 +803,30 @@ def GrafikGuncelle():
         GrafikKanvasi.mpl_connect("motion_notify_event", FareHareket)
         GrafikKanvasi.mpl_connect("button_release_event", FareBirak)
 
+def DosyayiVarsayilanUygulamaIleAc(yol: str):
+    # Opens the given file with the default operating system application.
+    if not yol or not os.path.exists(yol):
+        raise FileNotFoundError("dosya bulunamadi")
+    if os.name == "nt":
+        os.startfile(yol)
+    elif sys.platform == "darwin":
+        subprocess.call(["open", yol])
+    else:
+        subprocess.call(["xdg-open", yol])
+
 def PdfAc():
+    # Opens the last generated PDF report when it is available.
     global SonPdfYolu
     if SonPdfYolu and os.path.exists(SonPdfYolu):
         try:
-            if os.name == "nt":
-                os.startfile(SonPdfYolu)
-            elif sys.platform == "darwin":
-                subprocess.call(["open", SonPdfYolu])
-            else:
-                subprocess.call(["xdg-open", SonPdfYolu])
+            DosyayiVarsayilanUygulamaIleAc(SonPdfYolu)
         except Exception as e:
             messagebox.showerror("Hata!", f"pdf açılamadı:\n{e}")
     else:
         messagebox.showwarning("Uyarı", "henüz pdf oluşturulmadı veya dosya yok")
 
 def PdfOlustur():
+    # Builds and saves a PDF report for the current analysis result.
     global SonSonucSatirlari, GenelVeri, SeciliDosyaYolu, OlcekFaktoru, SonPdfYolu
     if not ReportLabVar:
         messagebox.showerror("Hata!", "reportlab kurulu değil (pip install reportlab)")
@@ -788,11 +855,17 @@ def PdfOlustur():
         SonPdfYolu = pdf_yolu
         AcButonu.config(state="normal")
         messagebox.showinfo("Başarılı", f"pdf kaydedildi:\n{pdf_yolu}")
+        if UygulamaAyarlari.get("pdf_auto_open", True):
+            try:
+                DosyayiVarsayilanUygulamaIleAc(pdf_yolu)
+            except Exception as e:
+                messagebox.showwarning("Uyarı", f"pdf kaydedildi fakat otomatik açılamadı:\n{e}")
     except Exception as e:
         messagebox.showerror("Hata!", f"pdf oluşturulurken hata:\n{e}")
 
 # küçük arayüz yardımcıları
 def MerkezliPencereAc(ebeveyn, w, h, baslik, bg="#f8fafc"):
+    # Creates a modal child window centered on the parent application window.
     dlg = tk.Toplevel(ebeveyn)
     dlg.withdraw()
     dlg.title(baslik)
@@ -810,6 +883,7 @@ def MerkezliPencereAc(ebeveyn, w, h, baslik, bg="#f8fafc"):
     return dlg
 
 def BasitGirdiPenceresi(ebeveyn, baslik, mesaj):
+    # Shows a small modal dialog that collects a single text value.
     dialog = MerkezliPencereAc(ebeveyn, 350, 160, baslik)
     tk.Label(dialog, text=mesaj, font=("Segoe UI", 12, "bold"),
              bg="#f8fafc", fg="#1e3a8a").pack(pady=(22, 5))
@@ -821,12 +895,14 @@ def BasitGirdiPenceresi(ebeveyn, baslik, mesaj):
     sonuc = {"val": None}
 
     def Tamam():
+        # Confirms the current dialog value and closes the window.
         v = giris.get().strip()
         if v:
             sonuc["val"] = v
             dialog.destroy()
 
     def Iptal():
+        # Closes the current dialog without applying a new value.
         dialog.destroy()
 
     btn_kutu = tk.Frame(dialog, bg="#f8fafc"); btn_kutu.pack(pady=5)
@@ -840,6 +916,7 @@ def BasitGirdiPenceresi(ebeveyn, baslik, mesaj):
     return sonuc["val"]
 
 def ModernOlcekPenceresi(ebeveyn, mevcut_olcek):
+    # Shows the scale factor editor dialog and validates numeric input.
     dialog = MerkezliPencereAc(ebeveyn, 370, 160, "Ölçek Değiştir")
     tk.Label(dialog, text=f"Yeni ölçek faktörünü girin (şu an: {mevcut_olcek}):",
              font=("Segoe UI", 11, "bold"), bg="#f8fafc", fg="#1e3a8a").pack(pady=(18, 7))
@@ -850,6 +927,7 @@ def ModernOlcekPenceresi(ebeveyn, mevcut_olcek):
     sonuc = {"olcek": None}
 
     def Tamam():
+        # Confirms the current dialog value and closes the window.
         try:
             val = float(giris.get())
             if val > 0:
@@ -859,6 +937,7 @@ def ModernOlcekPenceresi(ebeveyn, mevcut_olcek):
             giris.config(bg="#fee2e2")
 
     def Iptal():
+        # Closes the current dialog without applying a new value.
         dialog.destroy()
 
     btn_kutu = tk.Frame(dialog, bg="#f8fafc"); btn_kutu.pack(pady=5)
@@ -872,6 +951,16 @@ def ModernOlcekPenceresi(ebeveyn, mevcut_olcek):
     return sonuc["olcek"]
 
 def YoneticiGirisPaneli(ebeveyn, basarili_cb):
+    # Prompts for scale access only when local admin protection is enabled.
+    giris_bilgileri = UygulamaAyarlari.get("scale_auth", {})
+    kullanici_adi = str(giris_bilgileri.get("username", "") or "")
+    hash_degeri = giris_bilgileri.get("password_hash", "")
+    koruma_acik = bool(giris_bilgileri.get("enabled")) and bool(kullanici_adi) and bool(hash_degeri)
+
+    if not koruma_acik:
+        basarili_cb()
+        return
+
     giris = MerkezliPencereAc(ebeveyn, 400, 325, "Yönetici Girişi")
 
     ana = tk.Frame(giris, bg="#f8fafc", bd=0)
@@ -884,7 +973,7 @@ def YoneticiGirisPaneli(ebeveyn, basarili_cb):
              bg="#f8fafc").pack(anchor="w", padx=4)
     e_user = tk.Entry(ana, font=("Segoe UI", 12), bd=2, relief="groove")
     e_user.pack(fill="x", padx=2, pady=(2, 13))
-    e_user.insert(0, SabitKullaniciAdiSkala)
+    e_user.insert(0, kullanici_adi)
 
     tk.Label(ana, text="Şifre:", font=("Segoe UI", 11, "bold"),
              bg="#f8fafc").pack(anchor="w", padx=4)
@@ -892,8 +981,11 @@ def YoneticiGirisPaneli(ebeveyn, basarili_cb):
     e_pw = tk.Entry(f, font=("Segoe UI", 12), show="*", bd=2, relief="groove")
     e_pw.pack(side="left", fill="x", expand=True)
     goster_var = tk.BooleanVar(value=False)
+
     def SifreGoster():
+        # Toggles password visibility in the admin login dialog.
         e_pw.config(show="" if goster_var.get() else "*")
+
     tk.Checkbutton(f, text="Şifreyi göster", variable=goster_var, command=SifreGoster,
                    bg="#f8fafc", fg="#6b7280", font=("Segoe UI", 9),
                    activebackground="#f8fafc").pack(side="left", padx=(12,0))
@@ -903,12 +995,16 @@ def YoneticiGirisPaneli(ebeveyn, basarili_cb):
     hata.pack(pady=(7,4))
 
     def Dogrula():
-        if (e_user.get().strip() == SabitKullaniciAdiSkala and bcrypt.checkpw(e_pw.get().encode(), HashSifre)):
-            giris.destroy(); basarili_cb()
+        # Validates the provided admin credentials against the local config.
+        sakli_hash = hash_degeri.encode() if isinstance(hash_degeri, str) else hash_degeri
+        if e_user.get().strip() == kullanici_adi and bcrypt.checkpw(e_pw.get().encode(), sakli_hash):
+            giris.destroy()
+            basarili_cb()
         else:
             hata.config(text="kullanıcı adı veya şifre hatalı")
 
     def Iptal():
+        # Closes the current dialog without applying a new value.
         giris.destroy()
 
     b = tk.Frame(ana, bg="#f8fafc"); b.pack(fill="x", pady=(10, 0))
@@ -923,7 +1019,9 @@ def YoneticiGirisPaneli(ebeveyn, basarili_cb):
 
 # buton işlemleri
 def OlcegiDegistir():
+    # Starts the protected scale-change workflow for the current session.
     def Sonra():
+        # Applies the new scale factor after successful authorization.
         global OlcekFaktoru
         yeni = ModernOlcekPenceresi(Kok, OlcekFaktoru)
         if yeni is not None:
@@ -936,6 +1034,7 @@ def OlcegiDegistir():
     YoneticiGirisPaneli(Kok, Sonra)
 
 def DosyaSec():
+    # Opens a file picker and starts the analysis for the selected CSV file.
     f = filedialog.askopenfilename(title="CSV Dosyası Seç",
                                    filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
                                    initialdir=os.path.expanduser("~"))
@@ -944,6 +1043,7 @@ def DosyaSec():
         AnalizYap(f)
 
 def SurukleBirak(event):
+    # Processes files dropped onto the application window.
     try:
         yol_ham = event.data.strip()
         if yol_ham.startswith("{") and yol_ham.endswith("}"):
@@ -957,6 +1057,7 @@ def SurukleBirak(event):
         messagebox.showerror("Sürükle-Bırak Hatası", f"dosya okunamadı:\n{e}")
 
 def ModDegisti(mod=None):
+    # Switches the active analysis mode and resets the visible state.
     if mod is not None:
         ModDegeri.set(mod)
 
@@ -964,13 +1065,14 @@ def ModDegisti(mod=None):
     AyarlariKaydet(Ayarlar)
 
     # burası düzeltildi: sadece sözlüğe bakıp title alıyoruz
-    Kok.title(f"HIZAL ELEKTRO EROZYON AKIM ANALİZ PROGRAMI - {Varyantlar[ModDegeri.get()]['title']}")
+    Kok.title(f"{UygulamaAyarlari['current_window_title']} - {Varyantlar[ModDegeri.get()]['title']}")
 
     UygulamayiSifirla(clear_file=True)
     ModButonlariniGuncelle()
     SonucPaneliniGuncelle()
 
 def ModSeciciOlustur(ebeveyn):
+    # Creates the mode selector buttons shown in the header area.
     kap = tk.Frame(ebeveyn, bg=Renkler2["bg_secondary"])
     kap.place(relx=0.02, rely=0.5, anchor="w")
 
@@ -981,11 +1083,13 @@ def ModSeciciOlustur(ebeveyn):
     sar.pack(side="left")
 
     def Sec(mod: str):
+        # Handles clicks on a mode selector button.
         if ModDegeri.get() == mod:
             return
         ModDegisti(mod)
 
     def ButonOlustur(etiket):
+        # Creates a styled mode button bound to the requested mode key.
         return tk.Button(
             sar, text=etiket, bd=0, relief="flat",
             font=("Segoe UI", 11, "bold"),
@@ -1002,6 +1106,7 @@ def ModSeciciOlustur(ebeveyn):
     return kap
 
 def UygulamayiSifirla(clear_file=True):
+    # Clears the current analysis outputs and resets the UI panels.
     global SonSonucSatirlari, SonMetrikler, GorunumGecmisi, SonPdfYolu
     global GrafikKanvasi, GrafikAracCubugu, GenelVeri, SeciliDosyaYolu
 
@@ -1042,6 +1147,7 @@ def UygulamayiSifirla(clear_file=True):
         AcButonu.config(state="disabled")
 
 def ModButonlariniGuncelle():
+    # Refreshes the visual state of the mode selector buttons.
     secili = ModDegeri.get()
     for m, b in ModButonlari.items():
         if m == secili:
@@ -1052,6 +1158,7 @@ def ModButonlariniGuncelle():
                         activebackground="#f3f4f6", activeforeground="#111827")
 
 def SonucPaneliniGuncelle():
+    # Rebuilds the left-side results panel from the latest analysis rows.
     for w in SolCerceve.winfo_children():
         w.destroy()
 
@@ -1127,7 +1234,7 @@ if __name__ == "__main__":
         SonMod = "A"
     ModDegeri = tk.StringVar(value=SonMod)
 
-    baslik = f"HIZAL ELEKTRO EROZYON AKIM ANALİZ PROGRAMI - {Varyantlar[ModDegeri.get()]['title']}"
+    baslik = f"{UygulamaAyarlari['current_window_title']} - {Varyantlar[ModDegeri.get()]['title']}"
     Kok.title(baslik)
     Kok.geometry("1600x900"); Kok.configure(bg=Renkler2["bg_main"]); Kok.minsize(900, 520)
 
@@ -1150,6 +1257,7 @@ if __name__ == "__main__":
     buton_panel.grid_columnconfigure(2, weight=1)
 
     def ButonYap(yazi, komut, bg, hover=None):
+        # Creates a styled action button for the main control bar.
         if hover is None: hover = bg
         f = tk.Frame(buton_panel, bg=Renkler2["bg_main"])
         b = tk.Button(f, text=yazi, command=komut, font=("Segoe UI", 12, "bold"),
