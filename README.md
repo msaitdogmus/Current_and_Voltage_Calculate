@@ -24,22 +24,11 @@ Both applications provide CSV-based analysis, graphical visualization, configura
 - Automatic PDF opening after export
 - English one-line comments added for function readability
 
+
 ---
-
-## Project Structure
-
-```bash
-.
-├── Current.py
-├── Voltage.py
-├── app_config.example.json
-├── generate_password_hash.py
-├── .gitignore
-└── README.md
 
 ## Requirements
 
-'''bash
 Python 3.10 or newer
 Windows recommended
 Anaconda or standard Python installation
@@ -52,4 +41,6 @@ matplotlib
 bcrypt
 reportlab
 tkinterdnd2
+
+
 
